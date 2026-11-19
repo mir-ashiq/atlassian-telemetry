@@ -1,0 +1,356 @@
+# Atlassian Telemetry — one app: sprint risk radar + standup digest + knowledge constellation
+# Codegeist 2026: "Build with context. Ship with confidence."
+# Merges Sprint Guardian + Standup Digest + Constella into a single Forge app:
+# every surface calls the same pure, unit-tested engines.
+
+modules:
+  # ---------- Jira surfaces ----------
+  jira:globalPage:
+    - key: telemetry-command-center
+      resource: main-ui
+      resolver:
+        function: resolver
+      render: native
+      title: Telemetry Command Center
+
+  jira:issuePanel:
+    - key: telemetry-risk-radar
+      resource: main-ui
+      resolver:
+        function: resolver
+      render: native
+      title: Risk Radar
+      icon: resource:static-assets;icons/radar.svg
+
+  # ---------- Confluence surfaces ----------
+  confluence:globalPage:
+    - key: telemetry-constellation
+      resource: main-ui
+      resolver:
+        function: resolver
+      render: native
+      title: Telemetry Constellation
+
+  confluence:contentBylineItem:
+    - key: telemetry-page-people
+      resource: main-ui
+      resolver:
+        function: resolver
+      render: native
+      title: Telemetry — page people
+
+  # ---------- One agent, all three brains ----------
+  rovo:agent:
+    - key: telemetry-agent
+      name: Telemetry
+      description: >-
+        Your team's delivery intelligence: sprint risk audits, standup
+        digests, and the people behind your knowledge — one agent over one
+        engine. Ask me what's risky, what moved, or who to ask.
+      prompt: resource:agent-prompts;telemetry-agent-prompt.txt
+      conversationStarters:
+        - What are the biggest risks in my current sprint?
+        - Give me today's standup digest
+        - Who should I ask about the onboarding checklist?
+        - Audit issue PROJ-1 for hidden risks
+        - Who's blocked right now?
+      actions:
+        - get-sprint-snapshot
+        - audit-issue
+        - explain-risk-signal
+        - run-board-scan
+        - draft-follow-up-task
+        - annotate-issue
+        - get-standup-digest
+        - get-blockers
+        - get-page-people
+        - who-to-ask
+      followUpPrompt: >-
+        Suggest one specific next action the user can take right now —
+        a follow-up task for a risk finding, a blocker to chase, or a
+        person to ask — phrased as a question.
+
+  rovo:skill:
+    - key: risk-audit-skill
+      source:
+        dir: skills/risk-audit
+      dependencies:
+        tools:
+          - get-sprint-snapshot
+          - audit-issue
+          - draft-follow-up-task
+          - annotate-issue
+    - key: remediation-skill
+      source:
+        dir: skills/remediation
+      dependencies:
+        # GET-only on purpose: agents invoked from automation rules cannot
+        # invoke CREATE/UPDATE/TRIGGER actions; the chat-invoked path keeps
+        # the write tools.
+        tools:
+          - get-sprint-snapshot
+          - audit-issue
+          - explain-risk-signal
+
+  # ---------- One MCP server, all tools ----------
+  rovo:mcp:
+    - key: telemetry-mcp
+      name: Telemetry tools
+      tools:
+        - get-sprint-snapshot
+        - audit-issue
+        - draft-follow-up-task
+        - annotate-issue
+        - explain-risk-signal
+        - run-board-scan
+        - get-standup-digest
+        - get-blockers
+        - get-page-people
+        - who-to-ask
+
+  # ---------- Real-time + scheduled ----------
+  trigger:
+    - key: issue-created-trigger
+      function: on-issue-created
+      events:
+        - avi:jira:created:issue
+
+  scheduledTrigger:
+    - key: telemetry-hourly
+      function: hourly-refresh
+      interval: hour
+
+  # ---------- Actions ----------
+  action:
+    - key: get-sprint-snapshot
+      name: Get sprint snapshot
+      function: act-get-sprint-snapshot
+      actionVerb: GET
+      description: >-
+        Fetch the current sprint snapshot: name, dates, scope, risk profile
+        and the recent risk-score trend.
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+
+    - key: audit-issue
+      name: Audit an issue for hidden risks
+      function: act-audit-issue
+      actionVerb: GET
+      description: >-
+        Deep-audit a single Jira issue for hidden risks: missing acceptance
+        criteria, unestimated work, overdue state, stale updates, linked pull
+        request state, and scope churn.
+      inputs:
+        issueKeyOrId:
+          title: Issue key or ID
+          type: string
+          required: true
+          description: The issue to audit, for example PROJ-123 or its numeric ID.
+
+    - key: explain-risk-signal
+      name: Explain a risk signal
+      function: act-explain-risk-signal
+      actionVerb: GET
+      description: >-
+        Return the plain-language definition, detection rule, and recommended
+        remediation for one risk signal.
+      inputs:
+        signal:
+          title: Risk signal
+          type: string
+          required: true
+          description: Machine name of the signal, e.g. missing-acceptance-criteria.
+
+    - key: run-board-scan
+      name: Run a full board risk scan
+      function: act-run-board-scan
+      actionVerb: GET
+      description: >-
+        Scan every issue of the active sprint on the given board, recompute all
+        risk signals, persist the snapshot, and return a summary.
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+
+    - key: draft-follow-up-task
+      name: Draft follow-up task
+      function: act-draft-followup
+      actionVerb: CREATE
+      description: >-
+        Create a ready-to-review Jira subtask that captures risk findings as
+        structured follow-up work. Returns the new issue key and a link.
+      inputs:
+        parentIssueKey:
+          title: Parent issue key
+          type: string
+          required: true
+          description: The issue the follow-up should attach to, e.g. PROJ-123.
+        summary:
+          title: Task summary
+          type: string
+          required: true
+          description: One-line summary of the follow-up task.
+        riskSignal:
+          title: Risk signal
+          type: string
+          required: true
+          description: The risk signal that motivated this task.
+        findingsJson:
+          title: Findings (JSON)
+          type: string
+          required: false
+          description: Optional JSON string of findings to include in the description.
+
+    - key: annotate-issue
+      name: Annotate issue with risk report
+      function: act-annotate-issue
+      actionVerb: UPDATE
+      description: >-
+        Post the audit report as a formatted Jira comment with a risk-signal
+        breakdown.
+      inputs:
+        issueKeyOrId:
+          title: Issue key or ID
+          type: string
+          required: true
+          description: The issue to annotate, for example PROJ-123.
+        reportJson:
+          title: Report (JSON)
+          type: string
+          required: false
+          description: Optional audit-report JSON; when omitted the issue is re-audited first.
+
+    - key: get-standup-digest
+      name: Get standup digest
+      function: act-get-standup-digest
+      actionVerb: GET
+      description: >-
+        Build a per-person standup digest for a board: work updated since
+        yesterday, planned items, and blockers (status- or link-based).
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+
+    - key: get-blockers
+      name: Get current blockers
+      function: act-get-blockers
+      actionVerb: GET
+      description: >-
+        List all unresolved issues on the board that are blocked — by status
+        or by an unresolved blocking link.
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+
+    - key: get-page-people
+      name: Get page people
+      function: act-get-page-people
+      actionVerb: GET
+      description: >-
+        Creator, owners, and recent contributors of a Confluence page,
+        resolved from the Teamwork Graph.
+      inputs:
+        contentId:
+          title: Content ID
+          type: string
+          required: false
+          description: The page's content id; defaults to the page in context.
+
+    - key: who-to-ask
+      name: Who to ask about a topic
+      function: act-who-to-ask
+      actionVerb: GET
+      description: >-
+        Rank the best people to consult about a topic, from Confluence search
+        and Teamwork Graph ownership signals (owners weighted above
+        contributors).
+      inputs:
+        topic:
+          title: Topic
+          type: string
+          required: true
+          description: A keyword or phrase, e.g. "onboarding" or "Q3 launch plan".
+
+  # ---------- Backend functions ----------
+  function:
+    - key: resolver
+      handler: index.handler
+    - key: on-issue-created
+      handler: index.onIssueCreated
+    - key: hourly-refresh
+      handler: index.hourlyRefresh
+      timeoutSeconds: 300
+    - key: act-get-sprint-snapshot
+      handler: index.actGetSprintSnapshot
+    - key: act-audit-issue
+      handler: index.actAuditIssue
+    - key: act-explain-risk-signal
+      handler: index.actExplainRiskSignal
+    - key: act-run-board-scan
+      handler: index.actRunBoardScan
+      # Scan actions get a generous timeout so big boards cannot blow the
+      # 10s default mid-scan.
+      timeoutSeconds: 120
+    - key: act-draft-followup
+      handler: index.actDraftFollowUpTask
+    - key: act-annotate-issue
+      handler: index.actAnnotateIssue
+    - key: act-get-standup-digest
+      handler: index.actGetStandupDigest
+    - key: act-get-blockers
+      handler: index.actGetBlockers
+    - key: act-get-page-people
+      handler: index.actGetPagePeople
+    - key: act-who-to-ask
+      handler: index.actWhoToAsk
+
+resources:
+  - key: main-ui
+    path: src/frontend/index.jsx
+  - key: static-assets
+    path: assets
+  - key: agent-prompts
+    path: prompts
+
+permissions:
+  scopes:
+    # Jira: read work, write subtasks and comments (risk remediation)
+    - read:jira-work
+    - write:jira-work
+    - read:jira-user
+    # agile/board endpoints used by the Command Center, scans and digests
+    - read:board-scope:jira-software
+    - read:sprint:jira-software
+    - read:issue-details:jira
+    - read:jql:jira
+    - read:project:jira
+    # demo-data seeders: create project/sprint on a judge's empty site
+    - write:sprint:jira-software
+    # Confluence: search, read, and the demo-content seeder
+    - read:page:confluence
+    - search:confluence
+    - read:space:confluence
+    - write:page:confluence
+    - write:space:confluence
+    # Teamwork Graph curated queries (constellation + who-to-ask)
+    - read:teamwork-graph:confluence
+    - read:teamwork-graph:jira
+    - read:graph:user:atlassian
+
+app:
+  runtime:
+    name: nodejs24.x
+  id: ari:cloud:ecosystem::app/REPLACE_WITH_YOUR_APP_ID
